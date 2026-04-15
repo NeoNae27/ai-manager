@@ -29,6 +29,7 @@ interface TelegramGetUpdatesResponse {
     update_id: number;
     message?: {
       text?: string;
+      message_thread_id?: number;
       chat?: {
         id: number;
       };
@@ -239,14 +240,20 @@ export class TelegramChannelService {
       return;
     }
 
-    const command = message.text.trim().split(/\s+/, 1)[0]?.toLowerCase();
+    const command = this.#normalizeCommand(message.text);
 
     if (!command) {
       return;
     }
 
     if (command !== '/start') {
-      await this.#handleCommand(token, message.chat.id, message.from, command);
+      await this.#handleCommand(
+        token,
+        message.chat.id,
+        message.message_thread_id,
+        message.from,
+        command,
+      );
       return;
     }
 
@@ -258,12 +265,13 @@ export class TelegramChannelService {
       ...(message.from.username ? { username: message.from.username } : {}),
     });
 
-    await this.#sendRegistrationMessage(token, message.chat.id, pending);
+    await this.#sendRegistrationMessage(token, message.chat.id, message.message_thread_id, pending);
   }
 
   async #handleCommand(
     token: string,
     chatId: number,
+    messageThreadId: number | undefined,
     profile: TelegramUserProfile,
     command: string,
   ): Promise<void> {
@@ -278,6 +286,7 @@ export class TelegramChannelService {
           '/info - общая информация о текущей модели и сессии',
           '/help - показать эту справку',
         ].join('\n'),
+        messageThreadId,
       );
       return;
     }
@@ -289,6 +298,7 @@ export class TelegramChannelService {
         token,
         chatId,
         'Вы еще не авторизованы. Отправьте /start и завершите привязку через CLI.',
+        messageThreadId,
       );
       return;
     }
@@ -297,19 +307,20 @@ export class TelegramChannelService {
 
     switch (command) {
       case '/status':
-        await this.#sendMessage(token, chatId, this.#renderStatusMessage(user));
+        await this.#sendMessage(token, chatId, this.#renderStatusMessage(user), messageThreadId);
         return;
       case '/users':
-        await this.#handleUsersCommand(token, chatId, user);
+        await this.#handleUsersCommand(token, chatId, messageThreadId, user);
         return;
       case '/info':
-        await this.#handleInfoCommand(token, chatId, user);
+        await this.#handleInfoCommand(token, chatId, messageThreadId, user);
         return;
       default:
         await this.#sendMessage(
           token,
           chatId,
           'Неизвестная команда. Используйте /help для списка доступных команд.',
+          messageThreadId,
         );
     }
   }
@@ -317,6 +328,7 @@ export class TelegramChannelService {
   async #handleUsersCommand(
     token: string,
     chatId: number,
+    messageThreadId: number | undefined,
     requester: ChannelUserSummary,
   ): Promise<void> {
     if (requester.role === 'User') {
@@ -324,6 +336,7 @@ export class TelegramChannelService {
         token,
         chatId,
         'Команда /users доступна только для ролей Admin и Manager.',
+        messageThreadId,
       );
       return;
     }
@@ -337,12 +350,13 @@ export class TelegramChannelService {
       }),
     ];
 
-    await this.#sendMessage(token, chatId, lines.join('\n'));
+    await this.#sendMessage(token, chatId, lines.join('\n'), messageThreadId);
   }
 
   async #handleInfoCommand(
     token: string,
     chatId: number,
+    messageThreadId: number | undefined,
     requester: ChannelUserSummary,
   ): Promise<void> {
     let modelSummary: RuntimeModelSummary | undefined;
@@ -372,7 +386,7 @@ export class TelegramChannelService {
 
     lines.push('Примечание: полноценный Telegram-чат еще не включен, поэтому контекст пока не расходуется.');
 
-    await this.#sendMessage(token, chatId, lines.join('\n'));
+    await this.#sendMessage(token, chatId, lines.join('\n'), messageThreadId);
   }
 
   #renderStatusMessage(user: ChannelUserSummary): string {
@@ -428,6 +442,7 @@ export class TelegramChannelService {
   async #sendRegistrationMessage(
     token: string,
     chatId: number,
+    messageThreadId: number | undefined,
     pending: PendingTelegramRegistration,
   ): Promise<void> {
     const lines = [
@@ -441,7 +456,33 @@ export class TelegramChannelService {
       lines.unshift('Ваш аккаунт уже привязан. Ниже актуальные данные для повторной проверки.');
     }
 
-    await this.#sendMessage(token, chatId, lines.join('\n'));
+    await this.#sendMessage(token, chatId, lines.join('\n'), messageThreadId);
+  }
+
+  #normalizeCommand(rawText: string): string | undefined {
+    const commandToken = rawText.trim().split(/\s+/, 1)[0]?.toLowerCase();
+
+    if (!commandToken?.startsWith('/')) {
+      return undefined;
+    }
+
+    const [commandName, botMention] = commandToken.split('@', 2);
+
+    if (!commandName) {
+      return undefined;
+    }
+
+    if (!botMention) {
+      return commandName;
+    }
+
+    const configuredUsername = this.#store.getTelegramBotConfig()?.username?.toLowerCase();
+
+    if (!configuredUsername) {
+      return commandName;
+    }
+
+    return botMention === configuredUsername ? commandName : undefined;
   }
 
   #generateRegistrationKey(seed: string): string {
@@ -467,13 +508,19 @@ export class TelegramChannelService {
     return payload.result;
   }
 
-  async #sendMessage(token: string, chatId: number, text: string): Promise<void> {
+  async #sendMessage(
+    token: string,
+    chatId: number,
+    text: string,
+    messageThreadId?: number,
+  ): Promise<void> {
     const payload = await this.#request<TelegramSendMessageResponse>(
       token,
       'sendMessage',
       {
         chat_id: chatId,
         text,
+        ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
       },
     );
 
