@@ -1,42 +1,60 @@
-import { createInterface, type Interface } from 'node:readline/promises';
+import inquirer from 'inquirer';
 
-const createPromptLabel = (label: string): string => `${label.trim()}: `;
+import { color, menuOption, separator } from './theme.js';
 
 export class CliPrompter {
-  readonly #reader: Interface;
-
-  constructor() {
-    this.#reader = createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-  }
-
   async ask(label: string): Promise<string> {
-    return (await this.#reader.question(createPromptLabel(label))).trim();
+    const { value } = await inquirer.prompt<{ value: string }>([
+      {
+        type: 'input',
+        name: 'value',
+        message: label,
+      },
+    ]);
+
+    return value.trim();
   }
 
   async askRequired(label: string): Promise<string> {
-    while (true) {
-      const value = await this.ask(label);
+    const { value } = await inquirer.prompt<{ value: string }>([
+      {
+        type: 'input',
+        name: 'value',
+        message: label,
+        validate: (input: string) =>
+          input.trim().length > 0 || 'A value is required. Please try again.',
+        filter: (input: string) => input.trim(),
+      },
+    ]);
 
-      if (value.length > 0) {
-        return value;
-      }
-
-      console.log('A value is required. Please try again.');
-    }
+    return value;
   }
 
   async askOptional(label: string, defaultValue?: string): Promise<string | undefined> {
-    const suffix = defaultValue ? ` [${defaultValue}]` : '';
-    const answer = await this.ask(`${label}${suffix}`);
+    const { value } = await inquirer.prompt<{ value: string }>([
+      {
+        type: 'input',
+        name: 'value',
+        message: label,
+        default: defaultValue,
+        filter: (input: string) => input.trim(),
+      },
+    ]);
 
-    if (answer.length > 0) {
-      return answer;
-    }
+    return value.length > 0 ? value : defaultValue;
+  }
 
-    return defaultValue;
+  async confirm(label: string, defaultValue = true): Promise<boolean> {
+    const { confirmed } = await inquirer.prompt<{ confirmed: boolean }>([
+      {
+        type: 'confirm',
+        name: 'confirmed',
+        message: label,
+        default: defaultValue,
+      },
+    ]);
+
+    return confirmed;
   }
 
   async choose<T>(
@@ -48,25 +66,38 @@ export class CliPrompter {
       throw new Error('There are no available options to choose from.');
     }
 
-    console.log(label);
+    console.log(separator());
+    console.log(color.strong(label));
 
-    options.forEach((option, index) => {
-      console.log(`  ${index + 1}. ${render(option, index)}`);
-    });
+    const { selected } = await inquirer.prompt<{ selected: T }>(
+      {
+        type: 'select',
+        name: 'selected',
+        message: color.muted('Use arrows to navigate and Enter to confirm'),
+        loop: false,
+        pageSize: Math.min(Math.max(options.length, 6), 12),
+        choices: options.map((option, index) => ({
+          name: menuOption(index, render(option, index)),
+          value: option,
+          short: render(option, index),
+        })),
+      } as never,
+    );
 
-    while (true) {
-      const answer = await this.askRequired('Enter a number');
-      const selectedIndex = Number.parseInt(answer, 10) - 1;
+    return selected;
+  }
 
-      if (Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < options.length) {
-        return options[selectedIndex]!;
-      }
-
-      console.log('Could not recognize the selection. Enter a number from the list.');
-    }
+  async pause(message = 'Press Enter to continue'): Promise<void> {
+    await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'continue',
+        message,
+      },
+    ]);
   }
 
   close(): void {
-    this.#reader.close();
+    // Inquirer manages its own streams; nothing to dispose here.
   }
 }

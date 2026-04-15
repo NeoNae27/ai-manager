@@ -8,6 +8,7 @@ import type {
 import type { ProviderManagerClientContract } from './server-provider-manager-client.js';
 
 import { CliPrompter } from './prompt.js';
+import { badge, boxed, color, hero, icon, kv, modelCard, providerCard, sectionTitle, separator } from './theme.js';
 
 const menuItems = [
   'Register provider',
@@ -18,13 +19,21 @@ const menuItems = [
   'Exit',
 ] as const;
 
-const SANDBOX_STATUS_INTERVAL_MS = 1_000;
-
-const printDivider = (): void => {
-  console.log('\n----------------------------------------');
+const menuHints: Record<(typeof menuItems)[number], string> = {
+  'Register provider': 'Connect Ollama or LM Studio',
+  'Show registered providers': 'See saved endpoints and status',
+  'Select active provider': 'Choose the default provider',
+  'Show provider models': 'Browse available model catalog',
+  'Sandbox chat': 'Try a quick prompt in the terminal',
+  Exit: 'Close the CLI',
 };
 
-const formatStatus = (healthy: boolean): string => (healthy ? 'OK' : 'ERROR');
+const SANDBOX_STATUS_INTERVAL_MS = 1_000;
+
+const printDivider = (): void => console.log(`\n${separator()}`);
+const clearScreen = (): void => console.clear();
+
+const formatStatus = (healthy: boolean): string => (healthy ? 'online' : 'offline');
 
 const formatCapabilities = (model: ModelConfig): string => {
   const flags = [
@@ -39,10 +48,13 @@ const formatCapabilities = (model: ModelConfig): string => {
 };
 
 const formatProviderSummary = (provider: ProviderSummary): string =>
-  `${provider.name} (${provider.providerId}) | ${provider.baseUrl} | selected: ${provider.selected ? 'yes' : 'no'} | status: ${formatStatus(provider.healthy)} | models: ${provider.modelCount}`;
+  `${provider.name} (${provider.providerId}) · ${formatStatus(provider.healthy)} · ${provider.modelCount} models`;
 
 const formatRegisteredProvider = (provider: RegisteredProvider): string =>
-  `${provider.config.name} (${provider.config.id}) | ${provider.config.baseUrl} | status: ${provider.connection.ok ? 'OK' : provider.connection.message}`;
+  `${provider.config.name} (${provider.config.id}) · ${provider.config.baseUrl} · ${provider.connection.ok ? 'online' : provider.connection.message}`;
+
+const formatProviderDefinitionCompact = (provider: ProviderDefinition): string =>
+  `${provider.name} (${provider.id})`;
 
 const renderMessageContent = (content: Message['content']): string => {
   if (typeof content === 'string') {
@@ -60,7 +72,7 @@ const createStatusRenderer = (label: string): (() => void) => {
   const startedAt = Date.now();
 
   const render = (): string =>
-    `${label} (${Math.max(1, Math.floor((Date.now() - startedAt) / 1000))}s)`;
+    `${color.primary(label)} ${color.muted(`(${Math.max(1, Math.floor((Date.now() - startedAt) / 1000))}s)`)}`;
 
   process.stdout.write(`${render()}\r`);
 
@@ -85,20 +97,17 @@ export class CliApplication {
   }
 
   async run(): Promise<void> {
-    console.log('AI Manager CLI');
-    console.log('Interactive provider and model management.\n');
-
     try {
       await this.#ensureServerAvailability();
 
       let shouldExit = false;
 
       while (!shouldExit) {
-        printDivider();
+        await this.#renderHomeScreen();
         const selectedAction = await this.#prompter.choose(
           'Main menu',
           menuItems,
-          (item) => item,
+          (item) => `${item} ${color.muted(`· ${menuHints[item]}`)}`,
         );
 
         switch (selectedAction) {
@@ -126,7 +135,7 @@ export class CliApplication {
       this.#prompter.close();
     }
 
-    console.log('\nCLI finished.');
+    console.log(`\n${color.muted('CLI finished.')}`);
   }
 
   async #runAction(action: () => Promise<void>): Promise<void> {
@@ -135,14 +144,44 @@ export class CliApplication {
       await action();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'An unknown error occurred.';
-      console.error(`Error: ${message}`);
+      console.error(boxed('Action failed', [message], 'warning'));
+    } finally {
+      await this.#prompter.pause(color.muted('Press Enter to return to the main menu'));
     }
   }
 
   async #ensureServerAvailability(): Promise<void> {
-    process.stdout.write('Checking server availability... ');
+    process.stdout.write(`${color.muted('Checking server availability')}... `);
     await this.#providerManager.checkServerAvailability();
-    console.log('OK');
+    console.log(badge.status(true));
+  }
+
+  async #renderHomeScreen(): Promise<void> {
+    clearScreen();
+
+    const [providers, currentProvider] = await Promise.all([
+      this.#providerManager.listProviders(),
+      this.#providerManager.getCurrentProvider(),
+    ]);
+    const onlineProviders = providers.filter((provider) => provider.healthy).length;
+    const selectedLabel = currentProvider
+      ? `${currentProvider.config.name} (${currentProvider.config.id})`
+      : 'not selected yet';
+
+    console.log(
+      `${hero('Interactive Provider Console', 'Manage providers, inspect models, and run quick sandbox chats from one place.')}\n`,
+    );
+    console.log(
+      boxed('Workspace overview', [
+        kv('Saved providers', color.primary(String(providers.length))),
+        kv('Online providers', badge.status(onlineProviders > 0)),
+        kv('Active provider', currentProvider ? color.strong(selectedLabel) : color.dim(selectedLabel)),
+        kv(
+          'Available flows',
+          [color.primary('register'), color.primary('inspect'), color.primary('chat')].join('  '),
+        ),
+      ], 'success'),
+    );
   }
 
   async #registerProvider(): Promise<void> {
@@ -159,6 +198,15 @@ export class CliApplication {
     const timeoutValue = await this.#prompter.askOptional('Timeout (ms)', '120000');
     const defaultModelId = await this.#prompter.askOptional('Default model ID (optional)');
     const timeoutMs = this.#parseTimeout(timeoutValue);
+    const shouldSave = await this.#prompter.confirm(
+      `Save ${formatProviderDefinitionCompact(selectedProvider)} with base URL ${baseUrl}?`,
+      true,
+    );
+
+    if (!shouldSave) {
+      console.log(boxed('Registration cancelled', ['No changes were saved.'], 'warning'));
+      return;
+    }
 
     const registeredProvider = await this.#providerManager.saveProvider(selectedProvider.id, {
       baseUrl,
@@ -166,26 +214,42 @@ export class CliApplication {
       ...(defaultModelId ? { defaultModelId } : {}),
     });
 
-    console.log(`Provider ${registeredProvider.config.name} saved.`);
-    console.log(`Base URL: ${registeredProvider.config.baseUrl}`);
     console.log(
-      `Status: ${registeredProvider.connection.ok ? 'connection available' : registeredProvider.connection.message}`,
+      boxed('Provider saved', [
+        kv('Provider', color.strong(registeredProvider.config.name)),
+        kv('Base URL', registeredProvider.config.baseUrl),
+        kv(
+          'Status',
+          registeredProvider.connection.ok
+            ? badge.status(true)
+            : color.warning(registeredProvider.connection.message),
+        ),
+        kv('Models found', color.primary(String(registeredProvider.models.length))),
+      ], registeredProvider.connection.ok ? 'success' : 'warning'),
     );
-    console.log(`Models found: ${registeredProvider.models.length}`);
   }
 
   async #showRegisteredProviders(): Promise<void> {
     const providers = await this.#providerManager.listProviders();
 
     if (providers.length === 0) {
-      console.log('There are no registered providers yet.');
+      console.log(boxed('No providers yet', ['Register a provider to start browsing models and chatting.'], 'warning'));
       return;
     }
 
-    console.log('Registered providers:');
+    console.log(sectionTitle('Registered Providers', `${providers.length} saved connection${providers.length === 1 ? '' : 's'}`));
 
     providers.forEach((provider, index) => {
-      console.log(`  ${index + 1}. ${formatProviderSummary(provider)}`);
+      console.log(
+        `\n${color.muted(`#${index + 1}`)}\n${providerCard({
+          name: provider.name,
+          providerId: provider.providerId,
+          baseUrl: provider.baseUrl,
+          selected: provider.selected,
+          healthy: provider.healthy,
+          modelCount: provider.modelCount,
+        })}`,
+      );
     });
   }
 
@@ -193,7 +257,7 @@ export class CliApplication {
     const providers = await this.#providerManager.listProviders();
 
     if (providers.length === 0) {
-      console.log('Register at least one provider first.');
+      console.log(boxed('No providers yet', ['Register at least one provider before selecting an active one.'], 'warning'));
       return;
     }
 
@@ -204,14 +268,19 @@ export class CliApplication {
     );
     const savedProvider = await this.#providerManager.setSelectedProvider(selectedProvider.providerId);
 
-    console.log(`Active provider: ${savedProvider.config.name} (${savedProvider.config.id}).`);
+    console.log(
+      boxed('Active provider updated', [
+        kv('Provider', `${color.strong(savedProvider.config.name)} (${savedProvider.config.id})`),
+        kv('Base URL', savedProvider.config.baseUrl),
+      ], 'success'),
+    );
   }
 
   async #showProviderModels(): Promise<void> {
     const providers = await this.#providerManager.listProviders();
 
     if (providers.length === 0) {
-      console.log('There are no registered providers. Register one first.');
+      console.log(boxed('No providers yet', ['Register a provider first to inspect its model catalog.'], 'warning'));
       return;
     }
 
@@ -220,15 +289,26 @@ export class CliApplication {
     const modelResult = await this.#providerManager.getProviderModels(provider.providerId);
 
     if (modelResult.models.length === 0) {
-      console.log(`Provider ${provider.name} does not have any available models yet.`);
+      console.log(
+        boxed('No models available', [`Provider ${provider.name} does not currently expose any models.`], 'warning'),
+      );
       return;
     }
 
-    console.log(`Models for provider ${provider.name}:`);
+    console.log(
+      sectionTitle('Provider Models', `${provider.name} · ${modelResult.models.length} model${modelResult.models.length === 1 ? '' : 's'}`),
+    );
 
     modelResult.models.forEach((model, index) => {
       console.log(
-        `  ${index + 1}. ${model.label} | id: ${model.id} | context: ${model.contextWindow} | capabilities: ${formatCapabilities(model)}`,
+        `\n${color.muted(`#${index + 1}`)}\n${modelCard({
+          label: model.label,
+          id: model.id,
+          contextWindow: model.contextWindow,
+          capabilities: formatCapabilities(model)
+            .split(', ')
+            .filter((item) => item !== 'n/a'),
+        })}`,
       );
     });
   }
@@ -264,7 +344,7 @@ export class CliApplication {
   }
 
   #formatProviderDefinition(provider: ProviderDefinition): string {
-    return `${provider.name} (${provider.id}) | ${provider.description} | default: ${provider.defaultBaseUrl}`;
+    return `${formatProviderDefinitionCompact(provider)} · ${provider.description} · default: ${provider.defaultBaseUrl}`;
   }
 
   #parseTimeout(rawValue?: string): number | undefined {
@@ -287,28 +367,35 @@ export class CliApplication {
     const currentProvider = await this.#providerManager.getCurrentProvider();
 
     if (!currentProvider) {
-      console.log('Select an active provider before starting sandbox chat.');
+      console.log(boxed('Sandbox unavailable', ['Select an active provider before starting sandbox chat.'], 'warning'));
       return;
     }
 
     const modelResult = await this.#providerManager.getProviderModels(currentProvider.config.id);
 
     if (modelResult.models.length === 0) {
-      console.log(`Provider ${currentProvider.config.name} does not have any available models.`);
+      console.log(
+        boxed('Sandbox unavailable', [`Provider ${currentProvider.config.name} does not have any available models.`], 'warning'),
+      );
       return;
     }
 
     const selectedModel = await this.#chooseSandboxModel(currentProvider, modelResult.models);
     const history: Message[] = [];
 
-    console.log(`Sandbox chat is ready with ${currentProvider.config.name} / ${selectedModel.label}.`);
-    console.log('Type your message and press Enter. Use /exit or /quit to leave the sandbox chat.');
+    console.log(
+      boxed('Sandbox chat ready', [
+        kv('Provider', currentProvider.config.name),
+        kv('Model', selectedModel.label),
+        kv('Exit commands', '/exit, /quit'),
+      ], 'success'),
+    );
 
     while (true) {
       const userInput = await this.#prompter.askRequired('You');
 
       if (this.#isChatExitCommand(userInput)) {
-        console.log('Sandbox chat closed.');
+        console.log(color.muted('Sandbox chat closed.'));
         return;
       }
 
@@ -332,15 +419,17 @@ export class CliApplication {
 
         stopStatus();
         console.log(
-          `Assistant${assistantText.length > 0 ? '' : ' (empty response)'}: ${assistantText || '[empty response]'}`,
+          boxed(`${icon.chat} Assistant`, [
+            assistantText.length > 0 ? assistantText : color.dim('[empty response]'),
+          ], 'primary'),
         );
       } catch (error) {
         stopStatus();
         history.pop();
 
         const message = error instanceof Error ? error.message : 'Unknown sandbox chat error.';
-        console.error(`Assistant request failed: ${message}`);
-        console.log('You can try another message or use /exit to leave the sandbox chat.');
+        console.error(boxed('Assistant request failed', [message], 'warning'));
+        console.log(color.muted('You can try another message or use /exit to leave the sandbox chat.'));
       }
     }
   }
@@ -374,7 +463,7 @@ export class CliApplication {
     return this.#prompter.choose(
       `Available models for ${provider.config.name}`,
       models,
-      (model) => `${model.label} | id: ${model.id} | capabilities: ${formatCapabilities(model)}`,
+      (model) => `${model.label} · ${model.id} · ${formatCapabilities(model)}`,
     );
   }
 
