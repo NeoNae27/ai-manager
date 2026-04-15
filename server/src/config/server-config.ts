@@ -5,6 +5,7 @@ export interface ServerConfig {
   port: number;
   databasePath: string;
   apiPrefix: string;
+  telegramBotToken?: string;
 }
 
 const DEFAULT_HOST = '127.0.0.1';
@@ -41,4 +42,7 @@ export const loadServerConfig = (): ServerConfig => ({
   port: parsePort(process.env.SERVER_PORT),
   databasePath: resolve(process.env.SERVER_DB_PATH?.trim() || DEFAULT_DATABASE_PATH),
   apiPrefix: normalizeApiPrefix(process.env.SERVER_API_PREFIX),
+  ...(process.env.TELEGRAM_BOT_TOKEN?.trim()
+    ? { telegramBotToken: process.env.TELEGRAM_BOT_TOKEN.trim() }
+    : {}),
 });
