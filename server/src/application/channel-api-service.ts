@@ -105,6 +105,10 @@ export class ChannelApiService {
     return this.#store.listTelegramUsers();
   }
 
+  getTelegramAuthorizedUserByTelegramId(telegramUserId: string): ChannelUserSummary | undefined {
+    return this.#store.getTelegramUserByTelegramUserId(telegramUserId);
+  }
+
   updateTelegramUserRole(userId: string, role: ChannelUserRole): ChannelUserSummary {
     const existing = this.#store.getTelegramUser(userId);
 

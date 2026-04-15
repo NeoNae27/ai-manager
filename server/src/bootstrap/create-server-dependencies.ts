@@ -30,7 +30,8 @@ export const createServerDependencies = async (config: ServerConfig): Promise<Se
   const channelStore = new SqliteChannelStore(database);
   const providerRegistrationService = new ProviderRegistrationService({ store });
   const providerManager = new ApplicationProviderManager(providerRegistrationService);
-  const telegramChannelService = new TelegramChannelService(channelStore);
+  const chatApiService = new ChatApiService(providerRegistrationService);
+  const telegramChannelService = new TelegramChannelService(channelStore, chatApiService);
 
   channelStore.ensureTelegramChannel();
 
@@ -49,7 +50,7 @@ export const createServerDependencies = async (config: ServerConfig): Promise<Se
     database,
     healthService: new HealthService(database),
     providerApiService: new ProviderApiService(providerManager),
-    chatApiService: new ChatApiService(providerRegistrationService),
+    chatApiService,
     channelApiService: new ChannelApiService(channelStore, telegramChannelService),
     telegramChannelService,
   };

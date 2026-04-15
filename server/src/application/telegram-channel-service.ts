@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-import type { ChannelSummary, PendingTelegramRegistration } from './channel-types.js';
+import type { ChannelSummary, ChannelUserSummary, PendingTelegramRegistration } from './channel-types.js';
+import type { ChatApiService, RuntimeModelSummary } from './chat-api-service.js';
 import { SqliteChannelStore } from '../infrastructure/sqlite-channel-store.js';
 import { HttpError } from '../http/errors/http-error.js';
 
@@ -53,13 +54,20 @@ const formatTelegramDisplayName = (profile: TelegramUserProfile): string => {
 
 export class TelegramChannelService {
   readonly #store: SqliteChannelStore;
+  readonly #chatApiService: ChatApiService;
   #pollTimer: NodeJS.Timeout | undefined;
   #updateOffset = 0;
   #activeToken: string | undefined;
   #pollInFlight = false;
+  readonly #sessionStats = new Map<string, {
+    startedAt: string;
+    lastSeenAt: string;
+    commandCount: number;
+  }>();
 
-  constructor(store: SqliteChannelStore) {
+  constructor(store: SqliteChannelStore, chatApiService: ChatApiService) {
     this.#store = store;
+    this.#chatApiService = chatApiService;
   }
 
   async initialize(): Promise<void> {
@@ -151,7 +159,7 @@ export class TelegramChannelService {
     await this.#sendMessage(
       config.token,
       Number.parseInt(telegramUserId, 10),
-      'Все получилось! Жду команд',
+      'Все получилось! Жду команд.\nДоступные команды: /status, /users, /info, /help',
     );
   }
 
@@ -165,7 +173,7 @@ export class TelegramChannelService {
     await this.#sendMessage(
       config.token,
       Number.parseInt(telegramUserId, 10),
-      `Регистрация завершена. Ваша роль: ${role}. Жду команд.`,
+      `Регистрация завершена. Ваша роль: ${role}. Жду команд.\nДоступные команды: /status, /users, /info, /help`,
     );
   }
 
@@ -227,7 +235,18 @@ export class TelegramChannelService {
   ): Promise<void> {
     const message = update.message;
 
-    if (!message?.from || !message.chat?.id || message.text?.trim() !== '/start') {
+    if (!message?.from || !message.chat?.id || !message.text?.trim()) {
+      return;
+    }
+
+    const command = message.text.trim().split(/\s+/, 1)[0]?.toLowerCase();
+
+    if (!command) {
+      return;
+    }
+
+    if (command !== '/start') {
+      await this.#handleCommand(token, message.chat.id, message.from, command);
       return;
     }
 
@@ -240,6 +259,170 @@ export class TelegramChannelService {
     });
 
     await this.#sendRegistrationMessage(token, message.chat.id, pending);
+  }
+
+  async #handleCommand(
+    token: string,
+    chatId: number,
+    profile: TelegramUserProfile,
+    command: string,
+  ): Promise<void> {
+    if (command === '/help') {
+      await this.#sendMessage(
+        token,
+        chatId,
+        [
+          'Доступные команды:',
+          '/status - проверить состояние подключения канала',
+          '/users - список авторизованных пользователей',
+          '/info - общая информация о текущей модели и сессии',
+          '/help - показать эту справку',
+        ].join('\n'),
+      );
+      return;
+    }
+
+    const user = this.#store.getTelegramUserByTelegramUserId(profile.id.toString());
+
+    if (!user) {
+      await this.#sendMessage(
+        token,
+        chatId,
+        'Вы еще не авторизованы. Отправьте /start и завершите привязку через CLI.',
+      );
+      return;
+    }
+
+    this.#touchSession(user.telegramUserId);
+
+    switch (command) {
+      case '/status':
+        await this.#sendMessage(token, chatId, this.#renderStatusMessage(user));
+        return;
+      case '/users':
+        await this.#handleUsersCommand(token, chatId, user);
+        return;
+      case '/info':
+        await this.#handleInfoCommand(token, chatId, user);
+        return;
+      default:
+        await this.#sendMessage(
+          token,
+          chatId,
+          'Неизвестная команда. Используйте /help для списка доступных команд.',
+        );
+    }
+  }
+
+  async #handleUsersCommand(
+    token: string,
+    chatId: number,
+    requester: ChannelUserSummary,
+  ): Promise<void> {
+    if (requester.role === 'User') {
+      await this.#sendMessage(
+        token,
+        chatId,
+        'Команда /users доступна только для ролей Admin и Manager.',
+      );
+      return;
+    }
+
+    const users = this.#store.listTelegramUsers();
+    const lines = [
+      `Авторизованные пользователи: ${users.length}`,
+      ...users.map((user, index) => {
+        const username = user.username ? ` (@${user.username})` : '';
+        return `${index + 1}. ${user.displayName}${username} - ${user.role}`;
+      }),
+    ];
+
+    await this.#sendMessage(token, chatId, lines.join('\n'));
+  }
+
+  async #handleInfoCommand(
+    token: string,
+    chatId: number,
+    requester: ChannelUserSummary,
+  ): Promise<void> {
+    let modelSummary: RuntimeModelSummary | undefined;
+
+    try {
+      modelSummary = await this.#chatApiService.getRuntimeModelSummary();
+    } catch {
+      modelSummary = undefined;
+    }
+
+    const session = this.#touchSession(requester.telegramUserId);
+    const contextWindow = modelSummary?.contextWindow ?? 0;
+    const lines = [
+      `Пользователь: ${requester.displayName}`,
+      `Роль: ${requester.role}`,
+      modelSummary
+        ? `Модель: ${modelSummary.providerName} / ${modelSummary.modelLabel} (${modelSummary.modelId})`
+        : 'Модель: недоступна',
+      `Время сессии: ${this.#formatSessionDuration(session.startedAt)}`,
+      `Контекст сессии: 0 / ${contextWindow > 0 ? contextWindow : 'n/a'}`,
+      `Команд в сессии: ${session.commandCount}`,
+    ];
+
+    if (modelSummary) {
+      lines.push(`Провайдер: ${modelSummary.providerId}`);
+    }
+
+    lines.push('Примечание: полноценный Telegram-чат еще не включен, поэтому контекст пока не расходуется.');
+
+    await this.#sendMessage(token, chatId, lines.join('\n'));
+  }
+
+  #renderStatusMessage(user: ChannelUserSummary): string {
+    const channel = this.#store.getTelegramChannelSummary();
+    const session = this.#touchSession(user.telegramUserId);
+
+    return [
+      `Канал: ${channel.label}`,
+      `Статус: ${channel.status}`,
+      `Авторизован как: ${user.displayName} (${user.role})`,
+      `Сессия активна: ${this.#formatSessionDuration(session.startedAt)}`,
+      channel.connectedAt ? `Подключено с: ${channel.connectedAt}` : 'Подключено с: n/a',
+      channel.lastError ? `Последняя ошибка: ${channel.lastError}` : 'Ошибок подключения нет',
+    ].join('\n');
+  }
+
+  #touchSession(telegramUserId: string): { startedAt: string; lastSeenAt: string; commandCount: number } {
+    const timestamp = new Date().toISOString();
+    const existing = this.#sessionStats.get(telegramUserId);
+
+    if (!existing) {
+      const created = {
+        startedAt: timestamp,
+        lastSeenAt: timestamp,
+        commandCount: 1,
+      };
+      this.#sessionStats.set(telegramUserId, created);
+      return created;
+    }
+
+    const updated = {
+      ...existing,
+      lastSeenAt: timestamp,
+      commandCount: existing.commandCount + 1,
+    };
+    this.#sessionStats.set(telegramUserId, updated);
+    return updated;
+  }
+
+  #formatSessionDuration(startedAt: string): string {
+    const started = new Date(startedAt).getTime();
+    const elapsedMs = Math.max(0, Date.now() - started);
+    const minutes = Math.floor(elapsedMs / 60_000);
+    const seconds = Math.floor((elapsedMs % 60_000) / 1000);
+
+    if (minutes <= 0) {
+      return `${seconds}s`;
+    }
+
+    return `${minutes}m ${seconds}s`;
   }
 
   async #sendRegistrationMessage(

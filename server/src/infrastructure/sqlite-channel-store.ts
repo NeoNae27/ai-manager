@@ -636,6 +636,28 @@ export class SqliteChannelStore {
     return row ? mapUserSummary(row) : undefined;
   }
 
+  getTelegramUserByTelegramUserId(telegramUserId: string): ChannelUserSummary | undefined {
+    const row = this.#database.connection
+      .prepare(
+        `
+          SELECT
+            m.user_id,
+            m.role,
+            m.status,
+            m.created_at,
+            i.telegram_user_id,
+            i.username,
+            i.display_name
+          FROM channel_memberships m
+          INNER JOIN telegram_identities i ON i.linked_user_id = m.user_id
+          WHERE m.channel_type = ? AND i.telegram_user_id = ? AND m.status = 'active'
+        `,
+      )
+      .get(TELEGRAM_CHANNEL, telegramUserId) as ChannelUserRow | undefined;
+
+    return row ? mapUserSummary(row) : undefined;
+  }
+
   countActiveAdmins(): number {
     const row = this.#database.connection
       .prepare(
