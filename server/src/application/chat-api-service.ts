@@ -41,6 +41,14 @@ export interface SandboxChatResponse {
   usage?: TokenUsage;
 }
 
+export interface RuntimeModelSummary {
+  providerId: ProviderId;
+  providerName: string;
+  modelId: string;
+  modelLabel: string;
+  contextWindow: number;
+}
+
 const SANDBOX_GENERATION_TIMEOUT_MS = 120_000;
 
 export class ChatApiService {
@@ -102,6 +110,49 @@ export class ChatApiService {
     } catch (error) {
       return this.#mapChatError(error);
     }
+  }
+
+  async getRuntimeModelSummary(requestedProviderId?: ProviderId): Promise<RuntimeModelSummary> {
+    const provider = await this.#resolveProvider(requestedProviderId);
+    const registrationInput = this.#toRegistrationInput(provider);
+
+    if (!provider.config.enabled) {
+      throw new HttpError(
+        409,
+        'provider_disabled',
+        `Provider "${provider.config.name}" is disabled.`,
+      );
+    }
+
+    const connection = await this.#providerRegistrationService.checkConnection(registrationInput);
+
+    if (!connection.ok) {
+      throw new HttpError(
+        409,
+        'provider_unavailable',
+        `Provider "${provider.config.name}" is not available: ${connection.message}`,
+      );
+    }
+
+    const models = await this.#providerRegistrationService.listAvailableModels(registrationInput);
+
+    if (models.length === 0) {
+      throw new HttpError(
+        404,
+        'models_not_found',
+        `Provider "${provider.config.name}" does not have any available models.`,
+      );
+    }
+
+    const model = this.#resolveModel(provider, models);
+
+    return {
+      providerId: provider.config.id,
+      providerName: provider.config.name,
+      modelId: model.id,
+      modelLabel: model.label,
+      contextWindow: model.contextWindow,
+    };
   }
 
   async #resolveProvider(providerId?: ProviderId): Promise<RegisteredProvider> {

@@ -11,6 +11,13 @@ import type {
   ProviderDefinition,
   RegisteredProvider,
 } from '../ai-provider/src/domain/provider-registration.js';
+import type {
+  ChannelSummary,
+  ChannelUserRole,
+  ChannelUserSummary,
+  CompletedTelegramAuthorization,
+  TelegramConnectResult,
+} from '../server/src/application/channel-types.js';
 
 interface ServerProviderManagerClientOptions {
   serverBaseUrl: string;
@@ -70,6 +77,30 @@ interface SandboxChatResponse {
   usage?: TokenUsage;
 }
 
+interface ChannelListResponse {
+  channels: ChannelSummary[];
+}
+
+interface ChannelResponse {
+  channel: ChannelSummary;
+}
+
+interface TelegramConnectResponse {
+  result: TelegramConnectResult;
+}
+
+interface TelegramAuthorizationResponse {
+  result: CompletedTelegramAuthorization;
+}
+
+interface ChannelUsersResponse {
+  users: ChannelUserSummary[];
+}
+
+interface ChannelUserResponse {
+  user: ChannelUserSummary;
+}
+
 const normalizePath = (path: string): string => (path.startsWith('/') ? path : `/${path}`);
 
 const buildUrl = (baseUrl: string, path: string): string =>
@@ -95,6 +126,23 @@ export interface ProviderManagerClientContract {
     modelId?: string;
     messages: Message[];
   }): Promise<SandboxChatResponse>;
+  listChannels(): Promise<ChannelSummary[]>;
+  getChannelStatus(channelType: 'telegram'): Promise<ChannelSummary>;
+  connectTelegram(token: string): Promise<TelegramConnectResult>;
+  completeTelegramAuth(
+    telegramUserId: string,
+    key: string,
+  ): Promise<CompletedTelegramAuthorization>;
+  addTelegramUser(
+    telegramUserId: string,
+    key: string,
+    role: ChannelUserRole,
+  ): Promise<CompletedTelegramAuthorization>;
+  listTelegramUsers(): Promise<ChannelUserSummary[]>;
+  updateTelegramUserRole(userId: string, role: ChannelUserRole): Promise<ChannelUserSummary>;
+  removeTelegramUser(userId: string): Promise<ChannelUserSummary>;
+  recheckTelegram(): Promise<ChannelSummary>;
+  disconnectTelegram(): Promise<ChannelSummary>;
 }
 
 export class ServerProviderManagerClient implements ProviderManagerClientContract {
@@ -176,8 +224,90 @@ export class ServerProviderManagerClient implements ProviderManagerClientContrac
     return this.#requestJson<SandboxChatResponse>('POST', '/chat/sandbox', request);
   }
 
+  async listChannels(): Promise<ChannelSummary[]> {
+    const response = await this.#requestJson<ChannelListResponse>('GET', '/channels');
+    return response.channels;
+  }
+
+  async getChannelStatus(channelType: 'telegram'): Promise<ChannelSummary> {
+    const response = await this.#requestJson<ChannelResponse>(
+      'GET',
+      `/channels/${encodeURIComponent(channelType)}/status`,
+    );
+    return response.channel;
+  }
+
+  async connectTelegram(token: string): Promise<TelegramConnectResult> {
+    const response = await this.#requestJson<TelegramConnectResponse>(
+      'POST',
+      '/channels/telegram/connect',
+      { token },
+    );
+    return response.result;
+  }
+
+  async completeTelegramAuth(
+    telegramUserId: string,
+    key: string,
+  ): Promise<CompletedTelegramAuthorization> {
+    const response = await this.#requestJson<TelegramAuthorizationResponse>(
+      'POST',
+      '/channels/telegram/complete-auth',
+      { telegramUserId, key },
+    );
+    return response.result;
+  }
+
+  async addTelegramUser(
+    telegramUserId: string,
+    key: string,
+    role: ChannelUserRole,
+  ): Promise<CompletedTelegramAuthorization> {
+    const response = await this.#requestJson<TelegramAuthorizationResponse>(
+      'POST',
+      '/channels/telegram/add-user',
+      { telegramUserId, key, role },
+    );
+    return response.result;
+  }
+
+  async listTelegramUsers(): Promise<ChannelUserSummary[]> {
+    const response = await this.#requestJson<ChannelUsersResponse>('GET', '/channels/telegram/users');
+    return response.users;
+  }
+
+  async updateTelegramUserRole(
+    userId: string,
+    role: ChannelUserRole,
+  ): Promise<ChannelUserSummary> {
+    const response = await this.#requestJson<ChannelUserResponse>(
+      'POST',
+      `/channels/telegram/users/${encodeURIComponent(userId)}/role`,
+      { role },
+    );
+    return response.user;
+  }
+
+  async removeTelegramUser(userId: string): Promise<ChannelUserSummary> {
+    const response = await this.#requestJson<ChannelUserResponse>(
+      'DELETE',
+      `/channels/telegram/users/${encodeURIComponent(userId)}`,
+    );
+    return response.user;
+  }
+
+  async recheckTelegram(): Promise<ChannelSummary> {
+    const response = await this.#requestJson<ChannelResponse>('POST', '/channels/telegram/recheck');
+    return response.channel;
+  }
+
+  async disconnectTelegram(): Promise<ChannelSummary> {
+    const response = await this.#requestJson<ChannelResponse>('POST', '/channels/telegram/disconnect');
+    return response.channel;
+  }
+
   async #requestJson<T>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     body?: unknown,
     useApiPrefix = true,
