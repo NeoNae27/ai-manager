@@ -6,6 +6,11 @@ import type {
   RegisteredProvider,
 } from '../ai-provider/src/index.js';
 import type { TokenUsage } from '../ai-provider/src/domain/generation.js';
+import type {
+  ChannelSummary,
+  ChannelUserRole,
+  ChannelUserSummary,
+} from '../server/src/application/channel-types.js';
 import type { ProviderManagerClientContract } from './server-provider-manager-client.js';
 
 import { CliPrompter } from './prompt.js';
@@ -36,6 +41,17 @@ const providerSettingsItems = [
   'Show provider models',
   'Back',
 ] as const;
+
+const channelMenuItems = ['Telegram', 'Back'] as const;
+const connectedTelegramItems = [
+  'Add user',
+  'List users',
+  'Check connection',
+  'Update token',
+  'Disconnect channel',
+  'Back',
+] as const;
+const channelRoleItems = ['Admin', 'Manager', 'User'] as const satisfies readonly ChannelUserRole[];
 
 const providerSettingsHints: Record<(typeof providerSettingsItems)[number], string> = {
   'Register provider': 'Connect Ollama or LM Studio',
@@ -97,6 +113,23 @@ const formatRegisteredProvider = (provider: RegisteredProvider): string =>
 
 const formatProviderDefinitionCompact = (provider: ProviderDefinition): string =>
   `${provider.name} (${provider.id})`;
+
+const formatChannelStatus = (channel: ChannelSummary): string => {
+  switch (channel.status) {
+    case 'connected':
+      return color.success('connected');
+    case 'error':
+      return color.warning('error');
+    default:
+      return color.dim('disconnected');
+  }
+};
+
+const formatChannelSummary = (channel: ChannelSummary): string =>
+  `${channel.label} · ${formatChannelStatus(channel)}${channel.lastError ? ` · ${color.warning(channel.lastError)}` : ''}`;
+
+const formatChannelUser = (user: ChannelUserSummary): string =>
+  `${user.displayName} · ${user.role} · ${user.telegramUserId}`;
 
 const renderMessageContent = (content: Message['content']): string => {
   if (typeof content === 'string') {
@@ -165,10 +198,7 @@ export class CliApplication {
             await this.#openProviderSettings();
             break;
           case 'Channels':
-            await this.#runAction(() => this.#showPlaceholderSection(
-              'Channels',
-              'Connection and channel configuration will appear here.',
-            ));
+            await this.#runAction(() => this.#openChannels());
             break;
           case 'Skills':
             await this.#runAction(() => this.#showPlaceholderSection(
@@ -273,6 +303,37 @@ export class CliApplication {
     }
   }
 
+  async #openChannels(): Promise<void> {
+    let shouldReturn = false;
+
+    while (!shouldReturn) {
+      const channels = await this.#providerManager.listChannels();
+      const telegram = channels.find((channel) => channel.type === 'telegram');
+
+      if (!telegram) {
+        throw new Error('Telegram channel is unavailable.');
+      }
+
+      const selectedAction = await this.#prompter.choose(
+        'Channels',
+        channelMenuItems,
+        (item) =>
+          item === 'Telegram'
+            ? `${item} ${color.muted(`· ${formatChannelSummary(telegram)}`)}`
+            : item,
+      );
+
+      switch (selectedAction) {
+        case 'Telegram':
+          await this.#runProviderSettingsAction(() => this.#openTelegramChannel());
+          break;
+        case 'Back':
+          shouldReturn = true;
+          break;
+      }
+    }
+  }
+
   async #runProviderSettingsAction(action: () => Promise<void>): Promise<void> {
     try {
       printDivider();
@@ -282,6 +343,229 @@ export class CliApplication {
       console.error(boxed('Action failed', [message], 'warning'));
     } finally {
       await this.#prompter.pause(color.muted('Press Enter to return to provider settings'));
+    }
+  }
+
+  async #openTelegramChannel(): Promise<void> {
+    const channel = await this.#providerManager.getChannelStatus('telegram');
+
+    if (channel.status === 'connected') {
+      await this.#openConnectedTelegramMenu(channel);
+      return;
+    }
+
+    console.log(
+      boxed('Telegram Channel', [
+        kv('Status', formatChannelStatus(channel)),
+        kv('Configured', channel.configured ? color.success('yes') : color.dim('no')),
+        ...(channel.lastError ? [kv('Error', color.warning(channel.lastError))] : []),
+      ], channel.status === 'error' ? 'warning' : 'primary'),
+    );
+
+    const shouldConnect = await this.#prompter.confirm(
+      channel.configured
+        ? 'Reconnect Telegram with a new bot token?'
+        : 'Connect Telegram now?',
+      true,
+    );
+
+    if (!shouldConnect) {
+      return;
+    }
+
+    await this.#runTelegramOnboarding();
+  }
+
+  async #runTelegramOnboarding(): Promise<void> {
+    const token = await this.#prompter.askRequired('Telegram bot token');
+    const connectResult = await this.#providerManager.connectTelegram(token);
+
+    console.log(
+      boxed('Telegram connected', [
+        kv('Bot', connectResult.bot.username ? `@${connectResult.bot.username}` : connectResult.bot.displayName),
+        kv('Status', formatChannelStatus(connectResult.channel)),
+        color.muted('Open the bot chat, send /start, then return here with your Telegram id and key.'),
+      ], 'success'),
+    );
+
+    const telegramUserId = await this.#prompter.askRequired('Telegram user id');
+    const key = await this.#prompter.askRequired('Registration key');
+    const authResult = await this.#providerManager.completeTelegramAuth(telegramUserId, key);
+
+    console.log(
+      boxed('Administrator authorized', [
+        kv('User', authResult.user.displayName),
+        kv('Telegram ID', authResult.user.telegramUserId),
+        kv('Role', color.strong(authResult.user.role)),
+        kv(
+          'Admin assignment',
+          authResult.autoAssignedAdmin ? color.success('assigned automatically') : color.muted('reused existing access'),
+        ),
+      ], 'success'),
+    );
+  }
+
+  async #openConnectedTelegramMenu(initialChannel: ChannelSummary): Promise<void> {
+    let shouldReturn = false;
+    let channel = initialChannel;
+
+    while (!shouldReturn) {
+      console.log(
+        boxed('Telegram Channel', [
+          kv('Status', formatChannelStatus(channel)),
+          kv('Connected at', channel.connectedAt ?? color.dim('pending')),
+          ...(channel.lastError ? [kv('Error', color.warning(channel.lastError))] : []),
+        ], channel.status === 'error' ? 'warning' : 'success'),
+      );
+
+      const action = await this.#prompter.choose(
+        'Telegram actions',
+        connectedTelegramItems,
+        (item) => item,
+      );
+
+      switch (action) {
+        case 'Add user':
+          await this.#addTelegramUser();
+          break;
+        case 'List users':
+          await this.#manageTelegramUsers();
+          break;
+        case 'Check connection':
+          channel = await this.#providerManager.recheckTelegram();
+          console.log(boxed('Connection checked', [kv('Status', formatChannelStatus(channel))], 'success'));
+          break;
+        case 'Update token':
+          await this.#runTelegramOnboarding();
+          channel = await this.#providerManager.getChannelStatus('telegram');
+          break;
+        case 'Disconnect channel': {
+          const confirmed = await this.#prompter.confirm('Disconnect Telegram channel?', false);
+
+          if (!confirmed) {
+            break;
+          }
+
+          channel = await this.#providerManager.disconnectTelegram();
+          console.log(boxed('Telegram disconnected', [kv('Status', formatChannelStatus(channel))], 'warning'));
+          shouldReturn = true;
+          break;
+        }
+        case 'Back':
+          shouldReturn = true;
+          break;
+      }
+
+      if (!shouldReturn) {
+        channel = await this.#providerManager.getChannelStatus('telegram');
+      }
+    }
+  }
+
+  async #addTelegramUser(): Promise<void> {
+    console.log(
+      boxed('Add Telegram User', [
+        'Ask the user to open the bot chat and send /start.',
+        'After that, enter the Telegram user id and the registration key shown by the bot.',
+      ], 'primary'),
+    );
+
+    const telegramUserId = await this.#prompter.askRequired('Telegram user id');
+    const key = await this.#prompter.askRequired('Registration key');
+    const role = await this.#prompter.choose(
+      'Assign a role',
+      channelRoleItems,
+      (item) => item,
+    );
+
+    const result = await this.#providerManager.addTelegramUser(telegramUserId, key, role);
+    console.log(
+      boxed('User added', [
+        kv('User', result.user.displayName),
+        kv('Telegram ID', result.user.telegramUserId),
+        kv('Role', color.strong(result.user.role)),
+      ], 'success'),
+    );
+  }
+
+  async #manageTelegramUsers(): Promise<void> {
+    let shouldReturn = false;
+
+    while (!shouldReturn) {
+      const users = await this.#providerManager.listTelegramUsers();
+
+      if (users.length === 0) {
+        console.log(boxed('No users yet', ['Add a Telegram user to manage channel access.'], 'warning'));
+        return;
+      }
+
+      console.log(sectionTitle('Telegram Users', `${users.length} authorized user${users.length === 1 ? '' : 's'}`));
+      users.forEach((user, index) => {
+        console.log(
+          `\n${color.muted(`#${index + 1}`)}\n${boxed(user.displayName, [
+            kv('Telegram ID', user.telegramUserId),
+            kv('Role', color.strong(user.role)),
+            kv('Status', user.status),
+            ...(user.username ? [kv('Username', `@${user.username}`)] : []),
+          ], 'primary')}`,
+        );
+      });
+
+      const selected = await this.#prompter.choose(
+        'Choose a user to manage',
+        [...users, 'Back' as const],
+        (item) => item === 'Back' ? 'Back' : formatChannelUser(item),
+      );
+
+      if (selected === 'Back') {
+        shouldReturn = true;
+        continue;
+      }
+
+      await this.#manageTelegramUser(selected);
+    }
+  }
+
+  async #manageTelegramUser(user: ChannelUserSummary): Promise<void> {
+    const action = await this.#prompter.choose(
+      `Manage ${user.displayName}`,
+      ['Change role', 'Remove user', 'Back'] as const,
+      (item) => item,
+    );
+
+    switch (action) {
+      case 'Change role': {
+        const role = await this.#prompter.choose(
+          'Select a new role',
+          channelRoleItems,
+          (item) => `${item}${item === user.role ? ' (current)' : ''}`,
+        );
+        const updated = await this.#providerManager.updateTelegramUserRole(user.userId, role);
+        console.log(boxed('Role updated', [
+          kv('User', updated.displayName),
+          kv('Role', color.strong(updated.role)),
+        ], 'success'));
+        break;
+      }
+      case 'Remove user': {
+        const confirmed = await this.#prompter.confirm(
+          `Remove ${user.displayName} from Telegram access?`,
+          false,
+        );
+
+        if (!confirmed) {
+          return;
+        }
+
+        const removed = await this.#providerManager.removeTelegramUser(user.userId);
+        console.log(boxed('User removed', [
+          kv('User', removed.displayName),
+          kv('Telegram ID', removed.telegramUserId),
+        ], 'warning'));
+        break;
+      }
+      case 'Back':
+        break;
     }
   }
 

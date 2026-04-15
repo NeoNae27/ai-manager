@@ -9,7 +9,7 @@ const startServer = async (): Promise<{
   close: () => Promise<void>;
 }> => {
   const config = loadServerConfig();
-  const dependencies = createServerDependencies(config);
+  const dependencies = await createServerDependencies(config);
   const app = createServerApp(dependencies);
 
   const server = await new Promise<Server>((resolve, reject) => {
@@ -20,6 +20,7 @@ const startServer = async (): Promise<{
   const close = async (): Promise<void> =>
     new Promise((resolve, reject) => {
       server.close((error) => {
+        dependencies.telegramChannelService.dispose();
         dependencies.database.close();
 
         if (error) {

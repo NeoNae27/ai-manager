@@ -30,6 +30,63 @@ const schema = `
     key TEXT PRIMARY KEY,
     value TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS channels (
+    type TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS telegram_channel_config (
+    channel_type TEXT PRIMARY KEY,
+    bot_token TEXT,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    connected_at TEXT,
+    bot_id INTEGER,
+    bot_username TEXT,
+    bot_display_name TEXT,
+    FOREIGN KEY(channel_type) REFERENCES channels(type)
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS telegram_identities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_user_id TEXT NOT NULL UNIQUE,
+    username TEXT,
+    display_name TEXT NOT NULL,
+    linked_user_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(linked_user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS telegram_registration_keys (
+    telegram_identity_id INTEGER PRIMARY KEY,
+    registration_key TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(telegram_identity_id) REFERENCES telegram_identities(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS channel_memberships (
+    channel_type TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(channel_type, user_id),
+    FOREIGN KEY(channel_type) REFERENCES channels(type),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
 `;
 
 export class SqliteDatabase {
