@@ -5,35 +5,77 @@ import type {
   ProviderSummary,
   RegisteredProvider,
 } from '../ai-provider/src/index.js';
+import type { TokenUsage } from '../ai-provider/src/domain/generation.js';
 import type { ProviderManagerClientContract } from './server-provider-manager-client.js';
 
 import { CliPrompter } from './prompt.js';
-import { badge, boxed, color, hero, icon, kv, modelCard, providerCard, sectionTitle, separator } from './theme.js';
+import { badge, boxed, color, hero, icon, kv, modelCard, providerCard, sectionTitle, separator, terminalColumns } from './theme.js';
 
 const menuItems = [
-  'Register provider',
-  'Show registered providers',
-  'Select active provider',
-  'Show provider models',
+  'Provider settings',
+  'Channels',
+  'Skills',
+  'Integration',
   'Sandbox chat',
   'Exit',
 ] as const;
 
 const menuHints: Record<(typeof menuItems)[number], string> = {
+  'Provider settings': 'Register, inspect, select, and browse models',
+  Channels: 'Connect and configure communication channels',
+  Skills: 'Configure available skills',
+  Integration: 'Set up integrations with external services',
+  'Sandbox chat': 'Try a quick prompt in the terminal',
+  Exit: 'Close the CLI',
+};
+
+const providerSettingsItems = [
+  'Register provider',
+  'Show registered providers',
+  'Select active provider',
+  'Show provider models',
+  'Back',
+] as const;
+
+const providerSettingsHints: Record<(typeof providerSettingsItems)[number], string> = {
   'Register provider': 'Connect Ollama or LM Studio',
   'Show registered providers': 'See saved endpoints and status',
   'Select active provider': 'Choose the default provider',
   'Show provider models': 'Browse available model catalog',
-  'Sandbox chat': 'Try a quick prompt in the terminal',
-  Exit: 'Close the CLI',
+  Back: 'Return to the main menu',
 };
 
 const SANDBOX_STATUS_INTERVAL_MS = 1_000;
 
 const printDivider = (): void => console.log(`\n${separator()}`);
 const clearScreen = (): void => console.clear();
+const getTerminalRows = (): number => {
+  const rows = process.stdout.rows;
+  return typeof rows === 'number' && rows > 0 ? rows : 30;
+};
 
 const formatStatus = (healthy: boolean): string => (healthy ? 'online' : 'offline');
+const formatDuration = (durationMs: number): string =>
+  durationMs < 1000 ? `${durationMs} ms` : `${(durationMs / 1000).toFixed(2)} s`;
+
+const formatTokenUsage = (usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }): string => {
+  if (!usage) {
+    return 'usage unavailable';
+  }
+
+  const chunks = [
+    usage.inputTokens !== undefined ? `in ${usage.inputTokens}` : undefined,
+    usage.outputTokens !== undefined ? `out ${usage.outputTokens}` : undefined,
+    usage.totalTokens !== undefined ? `total ${usage.totalTokens}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+
+  return chunks.length > 0 ? chunks.join(' · ') : 'usage unavailable';
+};
+
+interface SandboxRequestStat {
+  durationMs: number;
+  usage: TokenUsage | undefined;
+}
 
 const formatCapabilities = (model: ModelConfig): string => {
   const flags = [
@@ -66,6 +108,14 @@ const renderMessageContent = (content: Message['content']): string => {
     .map((part) => part.text.trim())
     .filter((part) => part.length > 0)
     .join('\n');
+};
+
+const countRenderedLines = (value: string): number => {
+  const width = Math.max(1, terminalColumns());
+  return value.split('\n').reduce((total, line) => {
+    const visibleLength = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    return total + Math.max(1, Math.ceil(visibleLength / width));
+  }, 0);
 };
 
 const createStatusRenderer = (label: string): (() => void) => {
@@ -111,17 +161,26 @@ export class CliApplication {
         );
 
         switch (selectedAction) {
-          case 'Register provider':
-            await this.#runAction(() => this.#registerProvider());
+          case 'Provider settings':
+            await this.#openProviderSettings();
             break;
-          case 'Show registered providers':
-            await this.#runAction(() => this.#showRegisteredProviders());
+          case 'Channels':
+            await this.#runAction(() => this.#showPlaceholderSection(
+              'Channels',
+              'Connection and channel configuration will appear here.',
+            ));
             break;
-          case 'Select active provider':
-            await this.#runAction(() => this.#selectActiveProvider());
+          case 'Skills':
+            await this.#runAction(() => this.#showPlaceholderSection(
+              'Skills',
+              'Skill configuration will appear here.',
+            ));
             break;
-          case 'Show provider models':
-            await this.#runAction(() => this.#showProviderModels());
+          case 'Integration':
+            await this.#runAction(() => this.#showPlaceholderSection(
+              'Integration',
+              'Integrations with external services will appear here.',
+            ));
             break;
           case 'Sandbox chat':
             await this.#runAction(() => this.#runSandboxChat());
@@ -182,6 +241,48 @@ export class CliApplication {
         ),
       ], 'success'),
     );
+  }
+
+  async #openProviderSettings(): Promise<void> {
+    let shouldReturn = false;
+
+    while (!shouldReturn) {
+      const selectedAction = await this.#prompter.choose(
+        'Provider settings',
+        providerSettingsItems,
+        (item) => `${item} ${color.muted(`· ${providerSettingsHints[item]}`)}`,
+      );
+
+      switch (selectedAction) {
+        case 'Register provider':
+          await this.#runProviderSettingsAction(() => this.#registerProvider());
+          break;
+        case 'Show registered providers':
+          await this.#runProviderSettingsAction(() => this.#showRegisteredProviders());
+          break;
+        case 'Select active provider':
+          await this.#runProviderSettingsAction(() => this.#selectActiveProvider());
+          break;
+        case 'Show provider models':
+          await this.#runProviderSettingsAction(() => this.#showProviderModels());
+          break;
+        case 'Back':
+          shouldReturn = true;
+          break;
+      }
+    }
+  }
+
+  async #runProviderSettingsAction(action: () => Promise<void>): Promise<void> {
+    try {
+      printDivider();
+      await action();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'An unknown error occurred.';
+      console.error(boxed('Action failed', [message], 'warning'));
+    } finally {
+      await this.#prompter.pause(color.muted('Press Enter to return to provider settings'));
+    }
   }
 
   async #registerProvider(): Promise<void> {
@@ -382,16 +483,26 @@ export class CliApplication {
 
     const selectedModel = await this.#chooseSandboxModel(currentProvider, modelResult.models);
     const history: Message[] = [];
+    const requestStats: SandboxRequestStat[] = [];
 
-    console.log(
-      boxed('Sandbox chat ready', [
-        kv('Provider', currentProvider.config.name),
-        kv('Model', selectedModel.label),
-        kv('Exit commands', '/exit, /quit'),
-      ], 'success'),
+    const startConfirmed = await this.#prompter.confirm(
+      'Sandbox mode does not use memory. Continue anyway?',
+      true,
     );
 
+    if (!startConfirmed) {
+      console.log(boxed('Sandbox cancelled', ['Memory is unavailable in sandbox mode.'], 'warning'));
+      return;
+    }
+
     while (true) {
+      const renderedLineCount = this.#renderSandboxScreen({
+        providerName: currentProvider.config.name,
+        modelLabel: selectedModel.label,
+        history,
+        requestStats,
+      });
+      this.#pushSandboxInputToBottom(renderedLineCount);
       const userInput = await this.#prompter.askRequired('You');
 
       if (this.#isChatExitCommand(userInput)) {
@@ -405,6 +516,7 @@ export class CliApplication {
       });
 
       const stopStatus = createStatusRenderer('Assistant is thinking...');
+      const requestStartedAt = Date.now();
 
       try {
         const response = await this.#providerManager.sandboxChat({
@@ -414,15 +526,12 @@ export class CliApplication {
         });
 
         history.push(response.message);
-
-        const assistantText = renderMessageContent(response.message.content);
+        requestStats.push({
+          durationMs: Date.now() - requestStartedAt,
+          usage: response.usage,
+        });
 
         stopStatus();
-        console.log(
-          boxed(`${icon.chat} Assistant`, [
-            assistantText.length > 0 ? assistantText : color.dim('[empty response]'),
-          ], 'primary'),
-        );
       } catch (error) {
         stopStatus();
         history.pop();
@@ -432,6 +541,90 @@ export class CliApplication {
         console.log(color.muted('You can try another message or use /exit to leave the sandbox chat.'));
       }
     }
+  }
+
+  #renderSandboxScreen(input: {
+    providerName: string;
+    modelLabel: string;
+    history: Message[];
+    requestStats: SandboxRequestStat[];
+  }): number {
+    clearScreen();
+
+    const sections: string[] = [];
+
+    sections.push(
+      `${hero('Sandbox Chat', 'History stays above, input stays below. Memory is disabled in this mode.')}\n`,
+    );
+    sections.push(
+      boxed('Sandbox session', [
+        kv('Provider', input.providerName),
+        kv('Model', input.modelLabel),
+        kv('Exit commands', '/exit, /quit'),
+        kv('Memory', color.warning('disabled')),
+      ], 'success'),
+    );
+
+    if (input.history.length === 0) {
+      sections.push(`\n${boxed('Conversation', [color.dim('No messages yet. Your prompt will appear at the bottom.')], 'primary')}`);
+      const output = sections.join('\n');
+      console.log(output);
+      return countRenderedLines(output);
+    }
+
+    sections.push(`\n${sectionTitle('Conversation')}`);
+
+    let assistantResponseIndex = 0;
+
+    input.history.forEach((message) => {
+      const messageText = renderMessageContent(message.content);
+
+      if (message.role === 'assistant') {
+        const stats = input.requestStats[assistantResponseIndex];
+        assistantResponseIndex += 1;
+
+        sections.push(
+          `\n${boxed(`${icon.chat} Assistant`, [
+            messageText.length > 0 ? messageText : color.dim('[empty response]'),
+            color.muted(`Stats: ${formatTokenUsage(stats?.usage)} · ${formatDuration(stats?.durationMs ?? 0)}`),
+          ], 'primary')}`,
+        );
+        return;
+      }
+
+      const title =
+        message.role === 'user'
+          ? `${icon.prompt} You`
+          : `${icon.info} ${message.role.charAt(0).toUpperCase()}${message.role.slice(1)}`;
+
+      sections.push(
+        `\n${boxed(title, [
+          messageText.length > 0 ? messageText : color.dim('[empty message]'),
+        ], message.role === 'user' ? 'success' : 'primary')}`,
+      );
+    });
+
+    const output = sections.join('\n');
+    console.log(output);
+    return countRenderedLines(output);
+  }
+
+  #pushSandboxInputToBottom(renderedLineCount: number): void {
+    const reservedPromptLines = 2;
+    const remainingLines = getTerminalRows() - renderedLineCount - reservedPromptLines;
+
+    if (remainingLines > 0) {
+      process.stdout.write('\n'.repeat(remainingLines));
+    }
+  }
+
+  async #showPlaceholderSection(title: string, description: string): Promise<void> {
+    console.log(
+      boxed(`${title} · Coming soon`, [
+        description,
+        color.muted('This section is a placeholder for the next CLI iteration.'),
+      ], 'warning'),
+    );
   }
 
   async #chooseSandboxModel(

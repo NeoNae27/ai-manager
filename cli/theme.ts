@@ -102,7 +102,8 @@ export const badge = {
   },
 };
 
-export const separator = (): string => color.dim('─'.repeat(Math.min(terminalWidth(), 72)));
+export const separator = (): string => color.dim('─'.repeat(terminalWidth()));
+export const terminalColumns = (): number => terminalWidth();
 
 export const sectionTitle = (title: string, subtitle?: string): string => {
   const heading = `${color.strong(title)}`;
@@ -112,13 +113,8 @@ export const sectionTitle = (title: string, subtitle?: string): string => {
 export const boxed = (title: string, lines: string[], tone: 'primary' | 'success' | 'warning' = 'primary'): string => {
   const palette =
     tone === 'success' ? color.success : tone === 'warning' ? color.warning : color.primary;
-  const maxContentWidth = Math.min(Math.max(40, terminalWidth() - 6), 94);
-  const preparedLines = normalizeLines(lines.join('\n'), maxContentWidth);
-  const width = Math.max(
-    visibleLength(title),
-    ...preparedLines.map((line) => visibleLength(line)),
-    20,
-  );
+  const width = Math.max(20, terminalWidth() - 4, visibleLength(title) + 1);
+  const preparedLines = normalizeLines(lines.join('\n'), width);
 
   const top = palette(`╭─ ${title} ${'─'.repeat(Math.max(0, width - visibleLength(title) - 1))}╮`);
   const middle = preparedLines.map((line) => `${palette('│')} ${padRight(line, width)} ${palette('│')}`);
