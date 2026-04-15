@@ -23,6 +23,7 @@ import type {
   OllamaProviderConfig,
 } from '../../../ai-provider/src/providers/ollama/types.js';
 import { HttpError } from '../http/errors/http-error.js';
+import type { Logger } from '../logging/logger.js';
 
 export interface SandboxChatRequest {
   providerId?: ProviderId;
@@ -53,15 +54,26 @@ const SANDBOX_GENERATION_TIMEOUT_MS = 120_000;
 
 export class ChatApiService {
   readonly #providerRegistrationService: ProviderRegistrationServiceContract;
+  readonly #logger: Logger;
 
-  constructor(providerRegistrationService: ProviderRegistrationServiceContract) {
+  constructor(providerRegistrationService: ProviderRegistrationServiceContract, logger: Logger) {
     this.#providerRegistrationService = providerRegistrationService;
+    this.#logger = logger;
   }
 
   async sandboxChat(request: SandboxChatRequest): Promise<SandboxChatResponse> {
+    const startedAt = Date.now();
+
     try {
       const provider = await this.#resolveProvider(request.providerId);
       const registrationInput = this.#toRegistrationInput(provider);
+
+      this.#logger.info('Sandbox chat request started.', {
+        requestedProviderId: request.providerId,
+        providerId: provider.config.id,
+        messageCount: request.messages.length,
+        requestedModelId: request.modelId,
+      });
 
       if (!provider.config.enabled) {
         throw new HttpError(
@@ -106,13 +118,34 @@ export class ChatApiService {
       };
 
       const result = await this.#createProvider(provider, models).generate(generationRequest);
-      return this.#toSandboxResponse(result);
+      const response = this.#toSandboxResponse(result);
+
+      this.#logger.info('Sandbox chat request completed.', {
+        providerId: response.model.providerId,
+        modelId: response.model.id,
+        finishReason: response.finishReason,
+        durationMs: Date.now() - startedAt,
+        totalTokens: response.usage?.totalTokens,
+      });
+
+      return response;
     } catch (error) {
+      this.#logger.error('Sandbox chat request failed.', {
+        requestedProviderId: request.providerId,
+        requestedModelId: request.modelId,
+        messageCount: request.messages.length,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return this.#mapChatError(error);
     }
   }
 
   async getRuntimeModelSummary(requestedProviderId?: ProviderId): Promise<RuntimeModelSummary> {
+    this.#logger.info('Loading runtime model summary.', {
+      requestedProviderId,
+    });
+
     const provider = await this.#resolveProvider(requestedProviderId);
     const registrationInput = this.#toRegistrationInput(provider);
 
@@ -146,13 +179,20 @@ export class ChatApiService {
 
     const model = this.#resolveModel(provider, models);
 
-    return {
+    const summary = {
       providerId: provider.config.id,
       providerName: provider.config.name,
       modelId: model.id,
       modelLabel: model.label,
       contextWindow: model.contextWindow,
     };
+
+    this.#logger.info('Runtime model summary loaded.', {
+      providerId: summary.providerId,
+      modelId: summary.modelId,
+    });
+
+    return summary;
   }
 
   async #resolveProvider(providerId?: ProviderId): Promise<RegisteredProvider> {
