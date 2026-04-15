@@ -1,0 +1,29 @@
+{
+  "providers": [
+    {
+      "config": {
+        "id": "ollama",
+        "kind": "local",
+        "name": "Ollama",
+        "baseUrl": "http://127.0.0.1:11434",
+        "auth": {
+          "type": "none"
+        },
+        "enabled": true,
+        "timeoutMs": 10000
+      },
+      "models": [],
+      "connection": {
+        "providerId": "ollama",
+        "baseUrl": "http://127.0.0.1:11434",
+        "ok": false,
+        "checkedAt": "2026-04-07T13:28:33.338Z",
+        "latencyMs": 29,
+        "message": "fetch failed"
+      },
+      "createdAt": "2026-04-07T13:27:26.576Z",
+      "updatedAt": "2026-04-07T13:28:33.306Z"
+    }
+  ],
+  "selectedProviderId": "ollama"
+}
