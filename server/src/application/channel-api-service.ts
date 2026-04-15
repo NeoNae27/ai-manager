@@ -41,6 +41,12 @@ export class ChannelApiService {
     this.#telegramChannelService = telegramChannelService;
   }
 
+  #runBackground(task: Promise<void>): void {
+    void task.catch((error) => {
+      console.error('Background Telegram task failed.', error);
+    });
+  }
+
   listChannels(): ChannelSummary[] {
     return this.#store.listChannels();
   }
@@ -80,7 +86,7 @@ export class ChannelApiService {
   completeTelegramAuth(telegramUserId: string, key: string): CompletedTelegramAuthorization {
     try {
       const result = this.#store.completeTelegramRegistration(telegramUserId, key);
-      void this.#telegramChannelService.sendAuthorizationSuccess(telegramUserId);
+      this.#runBackground(this.#telegramChannelService.sendAuthorizationSuccess(telegramUserId));
       return result;
     } catch (error) {
       return mapChannelError(error);
@@ -94,7 +100,9 @@ export class ChannelApiService {
   ): CompletedTelegramAuthorization {
     try {
       const result = this.#store.completeTelegramRegistration(telegramUserId, key, role);
-      void this.#telegramChannelService.sendUserAddedSuccess(telegramUserId, result.user.role);
+      this.#runBackground(
+        this.#telegramChannelService.sendUserAddedSuccess(telegramUserId, result.user.role),
+      );
       return result;
     } catch (error) {
       return mapChannelError(error);
