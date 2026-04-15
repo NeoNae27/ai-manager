@@ -10,13 +10,16 @@ import type { ProviderAuthConfig, ProviderConfig, ProviderId, ProviderKind } fro
 import { checkLMStudioConnection, listLMStudioModels } from '../providers/lmstudio/discovery.js';
 import { checkOllamaConnection, listOllamaModels } from '../providers/ollama/discovery.js';
 
+// Connection Timeout
 const DEFAULT_TIMEOUT_MS = 10_000;
 
+// Providers Config SQL Store
 interface ProviderManagementDependencies {
   store: ProviderConfigurationStore;
   now?: () => string;
 }
 
+// Provider Connection Check
 interface ProviderConnectionProbe {
   checkConnection(input: ProviderRegistrationInput): Promise<ProviderConnectionStatus>;
   listModels(input: ProviderRegistrationInput): Promise<ModelConfig[]>;
@@ -24,6 +27,7 @@ interface ProviderConnectionProbe {
 
 const normalizeBaseUrl = (baseUrl: string): string => baseUrl.trim().replace(/\/+$/, '');
 
+// Supported AI Providers (Ollama, LM Studio)
 const providerDefinitions = [
   {
     id: 'ollama',
