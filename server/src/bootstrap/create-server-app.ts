@@ -7,9 +7,11 @@ import { createChannelRouter } from '../http/routes/channel-routes.js';
 import { createProviderRouter } from '../http/routes/provider-routes.js';
 import { notFoundHandler } from '../http/middleware/not-found-handler.js';
 import { errorHandler } from '../http/middleware/error-handler.js';
+import { createRequestLogger } from '../http/middleware/request-logger.js';
 
 export const createServerApp = ({
   config,
+  logger,
   healthService,
   providerApiService,
   chatApiService,
@@ -20,6 +22,7 @@ export const createServerApp = ({
 
   app.disable('x-powered-by');
   app.use(express.json());
+  app.use(createRequestLogger(logger));
 
   app.use('/health', createHealthRouter(healthService));
 
@@ -28,8 +31,8 @@ export const createServerApp = ({
   apiRouter.use('/channels', createChannelRouter(channelApiService));
   app.use(config.apiPrefix, apiRouter);
 
-  app.use(notFoundHandler);
-  app.use(errorHandler);
+  app.use(notFoundHandler(logger));
+  app.use(errorHandler(logger));
 
   return app;
 };

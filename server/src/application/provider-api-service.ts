@@ -15,6 +15,7 @@ import type {
   ProviderOperationOptionsRequest,
 } from '../http/dto/providers.js';
 import { HttpError } from '../http/errors/http-error.js';
+import type { Logger } from '../logging/logger.js';
 
 const toRegisterProviderOptions = (
   request: ProviderOperationOptionsRequest,
@@ -52,42 +53,73 @@ const mapProviderError = (error: unknown): never => {
 
 export class ProviderApiService {
   readonly #providerManager: ApplicationProviderManagerContract;
+  readonly #logger: Logger;
 
-  constructor(providerManager: ApplicationProviderManagerContract) {
+  constructor(providerManager: ApplicationProviderManagerContract, logger: Logger) {
     this.#providerManager = providerManager;
+    this.#logger = logger;
   }
 
   listDefinitions(): ProviderDefinition[] {
     try {
+      this.#logger.info('Listing supported providers.');
       return this.#providerManager.listSupportedProviders();
     } catch (error) {
+      this.#logger.error('Failed to list supported providers.', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return mapProviderError(error);
     }
   }
 
   async listProviders(): Promise<ProviderSummary[]> {
     try {
+      this.#logger.info('Listing registered providers.');
       return await this.#providerManager.listProviders();
     } catch (error) {
+      this.#logger.error('Failed to list registered providers.', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return mapProviderError(error);
     }
   }
 
   async getCurrentProvider(): Promise<RegisteredProvider | undefined> {
     try {
+      this.#logger.info('Loading current provider.');
       return await this.#providerManager.getCurrentProvider();
     } catch (error) {
+      this.#logger.error('Failed to load current provider.', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return mapProviderError(error);
     }
   }
 
   async createProvider(request: CreateProviderRequest): Promise<RegisteredProvider> {
     try {
-      return await this.#providerManager.saveProvider(
+      this.#logger.info('Registering provider.', {
+        providerId: request.providerId,
+        hasBaseUrl: Boolean(request.baseUrl),
+        timeoutMs: request.timeoutMs,
+        defaultModelId: request.defaultModelId,
+      });
+
+      const provider = await this.#providerManager.saveProvider(
         request.providerId,
         toRegisterProviderOptions(request),
       );
+
+      this.#logger.info('Provider registered successfully.', {
+        providerId: provider.config.id,
+        providerName: provider.config.name,
+      });
+      return provider;
     } catch (error) {
+      this.#logger.error('Failed to register provider.', {
+        providerId: request.providerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return mapProviderError(error);
     }
   }
@@ -97,27 +129,67 @@ export class ProviderApiService {
     request: ProviderOperationOptionsRequest = {},
   ): Promise<ProviderHealthCheckResult> {
     try {
-      return await this.#providerManager.pingProvider(
+      this.#logger.info('Checking provider health.', {
+        providerId,
+      });
+
+      const result = await this.#providerManager.pingProvider(
         providerId,
         toRegisterProviderOptions(request),
       );
+
+      this.#logger.info('Provider health check completed.', {
+        providerId,
+        ok: result.status.ok,
+      });
+      return result;
     } catch (error) {
+      this.#logger.error('Provider health check failed.', {
+        providerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return mapProviderError(error);
     }
   }
 
   async getProviderModels(providerId: ProviderId): Promise<ProviderModelListResult> {
     try {
-      return await this.#providerManager.getProviderModels(providerId);
+      this.#logger.info('Loading provider models.', {
+        providerId,
+      });
+
+      const result = await this.#providerManager.getProviderModels(providerId);
+      this.#logger.info('Provider models loaded.', {
+        providerId,
+        modelCount: result.models.length,
+      });
+      return result;
     } catch (error) {
+      this.#logger.error('Failed to load provider models.', {
+        providerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return mapProviderError(error);
     }
   }
 
   async selectProvider(providerId: ProviderId): Promise<RegisteredProvider> {
     try {
-      return await this.#providerManager.setSelectedProvider(providerId);
+      this.#logger.info('Selecting active provider.', {
+        providerId,
+      });
+
+      const provider = await this.#providerManager.setSelectedProvider(providerId);
+      this.#logger.info('Active provider selected.', {
+        providerId: provider.config.id,
+        providerName: provider.config.name,
+      });
+      return provider;
     } catch (error) {
+      this.#logger.error('Failed to select active provider.', {
+        providerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return mapProviderError(error);
     }
   }
