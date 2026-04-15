@@ -3,13 +3,25 @@ import type { Server } from 'node:http';
 import { createServerApp } from './bootstrap/create-server-app.js';
 import { createServerDependencies } from './bootstrap/create-server-dependencies.js';
 import { loadServerConfig } from './config/server-config.js';
+import { createLogger } from './logging/logger.js';
+
+const logger = createLogger('server');
 
 const startServer = async (): Promise<{
   server: Server;
   close: () => Promise<void>;
 }> => {
   const config = loadServerConfig();
-  const dependencies = await createServerDependencies(config);
+  logger.info('Server configuration loaded.', {
+    host: config.host,
+    port: config.port,
+    apiPrefix: config.apiPrefix,
+    databasePath: config.databasePath,
+    telegramConfigured: Boolean(config.telegramBotToken),
+  });
+  logger.info('Starting server.');
+
+  const dependencies = await createServerDependencies(config, logger);
   const app = createServerApp(dependencies);
 
   const server = await new Promise<Server>((resolve, reject) => {
@@ -24,10 +36,14 @@ const startServer = async (): Promise<{
         dependencies.database.close();
 
         if (error) {
+          logger.error('Graceful shutdown failed.', {
+            error: error instanceof Error ? error.message : String(error),
+          });
           reject(error);
           return;
         }
 
+        logger.info('Graceful shutdown completed.');
         resolve();
       });
     });
@@ -39,22 +55,27 @@ const startServer = async (): Promise<{
 };
 
 const registerShutdown = (close: () => Promise<void>): void => {
-  const shutdown = async (): Promise<void> => {
+  const shutdown = async (signal: 'SIGINT' | 'SIGTERM'): Promise<void> => {
+    logger.info('Shutdown signal received.', { signal });
+
     try {
       await close();
       process.exit(0);
     } catch (error) {
-      console.error('Failed to shut down server gracefully.', error);
+      logger.error('Failed to shut down server gracefully.', {
+        signal,
+        error: error instanceof Error ? error.message : String(error),
+      });
       process.exit(1);
     }
   };
 
   process.once('SIGINT', () => {
-    void shutdown();
+    void shutdown('SIGINT');
   });
 
   process.once('SIGTERM', () => {
-    void shutdown();
+    void shutdown('SIGTERM');
   });
 };
 
@@ -70,8 +91,12 @@ try {
         ? `http://${address.address}:${address.port}`
         : 'unknown';
 
-  console.log(`Server is running at ${renderedAddress}`);
+  logger.info('Server started successfully.', {
+    address: renderedAddress,
+  });
 } catch (error) {
-  console.error('Failed to start server.', error);
+  logger.error('Failed to start server.', {
+    error: error instanceof Error ? error.message : String(error),
+  });
   process.exit(1);
 }

@@ -4,6 +4,7 @@ import type { ChannelSummary, ChannelUserSummary, PendingTelegramRegistration } 
 import type { ChatApiService, RuntimeModelSummary } from './chat-api-service.js';
 import { SqliteChannelStore } from '../infrastructure/sqlite-channel-store.js';
 import { HttpError } from '../http/errors/http-error.js';
+import type { Logger } from '../logging/logger.js';
 
 interface TelegramUserProfile {
   id: number;
@@ -66,6 +67,7 @@ const formatTelegramDisplayName = (profile: TelegramUserProfile): string => {
 export class TelegramChannelService {
   readonly #store: SqliteChannelStore;
   readonly #chatApiService: ChatApiService;
+  readonly #logger: Logger;
   #pollTimer: NodeJS.Timeout | undefined;
   #updateOffset = 0;
   #activeToken: string | undefined;
@@ -76,9 +78,10 @@ export class TelegramChannelService {
     commandCount: number;
   }>();
 
-  constructor(store: SqliteChannelStore, chatApiService: ChatApiService) {
+  constructor(store: SqliteChannelStore, chatApiService: ChatApiService, logger: Logger) {
     this.#store = store;
     this.#chatApiService = chatApiService;
+    this.#logger = logger;
   }
 
   async initialize(): Promise<void> {
@@ -86,10 +89,12 @@ export class TelegramChannelService {
     const config = this.#store.getTelegramBotConfig();
 
     if (!config?.token || !config.enabled) {
+      this.#logger.info('Telegram polling is disabled.');
       return;
     }
 
     this.#activeToken = config.token;
+    this.#logger.info('Starting Telegram polling from stored configuration.');
     this.#startPolling(config.token);
   }
 
@@ -97,6 +102,7 @@ export class TelegramChannelService {
     if (this.#pollTimer) {
       clearInterval(this.#pollTimer);
       this.#pollTimer = undefined;
+      this.#logger.info('Telegram polling stopped.');
     }
   }
 
@@ -108,6 +114,7 @@ export class TelegramChannelService {
       displayName: string;
     };
   }> {
+    this.#logger.info('Validating Telegram bot token.');
     const me = await this.#getMe(token);
     const channel = this.#store.saveTelegramBotConfig({
       token,
@@ -118,6 +125,10 @@ export class TelegramChannelService {
 
     this.#activeToken = token;
     this.#startPolling(token);
+    this.#logger.info('Telegram bot connected successfully.', {
+      botId: me.id,
+      botUsername: me.username,
+    });
 
     return {
       channel,
@@ -137,13 +148,16 @@ export class TelegramChannelService {
     this.dispose();
     this.#activeToken = undefined;
     this.#updateOffset = 0;
+    this.#logger.info('Telegram bot disconnected and polling state cleared.');
     return this.#store.disconnectTelegramChannel();
   }
 
   async recheck(): Promise<ChannelSummary> {
+    this.#logger.info('Rechecking Telegram bot status.');
     const config = this.#store.getTelegramBotConfig();
 
     if (!config?.token) {
+      this.#logger.warn('Telegram recheck skipped because no token is configured.');
       return this.#store.setTelegramChannelStatus('disconnected');
     }
 
@@ -153,9 +167,15 @@ export class TelegramChannelService {
       this.#startPolling(config.token);
 
       const hasUsers = this.#store.listTelegramUsers().length > 0;
+      this.#logger.info('Telegram bot recheck succeeded.', {
+        hasUsers,
+      });
       return this.#store.setTelegramChannelStatus(hasUsers ? 'connected' : 'disconnected');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to check Telegram bot.';
+      this.#logger.error('Telegram bot recheck failed.', {
+        error: message,
+      });
       return this.#store.setTelegramChannelStatus('error', message);
     }
   }
@@ -193,6 +213,7 @@ export class TelegramChannelService {
       clearInterval(this.#pollTimer);
     }
 
+    this.#logger.info('Starting Telegram polling loop.');
     this.#pollTimer = setInterval(() => {
       void this.#poll(token);
     }, POLL_INTERVAL_MS);
@@ -234,6 +255,9 @@ export class TelegramChannelService {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Telegram polling failed unexpectedly.';
+      this.#logger.error('Telegram polling iteration failed.', {
+        error: message,
+      });
       this.#store.setTelegramChannelStatus('error', message);
     } finally {
       this.#pollInFlight = false;
