@@ -32,6 +32,7 @@ interface TelegramGetUpdatesResponse {
       message_thread_id?: number;
       chat?: {
         id: number;
+        type?: 'private' | 'group' | 'supergroup' | 'channel';
       };
       from?: TelegramUserProfile;
     };
@@ -41,12 +42,21 @@ interface TelegramGetUpdatesResponse {
 
 interface TelegramSendMessageResponse {
   ok: boolean;
+  result?: {
+    message_id: number;
+  };
+  description?: string;
+}
+
+interface TelegramChatActionResponse {
+  ok: boolean;
   description?: string;
 }
 
 const TELEGRAM_API_BASE_URL = 'https://api.telegram.org';
 const POLL_INTERVAL_MS = 2_500;
 const SEND_TIMEOUT_MS = 15_000;
+const TYPING_REFRESH_INTERVAL_MS = 4_000;
 
 const formatTelegramDisplayName = (profile: TelegramUserProfile): string => {
   const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(' ').trim();
@@ -160,7 +170,7 @@ export class TelegramChannelService {
     await this.#sendMessage(
       config.token,
       Number.parseInt(telegramUserId, 10),
-      'Все получилось! Жду команд.\nДоступные команды: /status, /users, /info, /help',
+      'Все получилось! Жду команд.\nДоступные команды: /status, /users, /info, /msg, /help',
     );
   }
 
@@ -174,7 +184,7 @@ export class TelegramChannelService {
     await this.#sendMessage(
       config.token,
       Number.parseInt(telegramUserId, 10),
-      `Регистрация завершена. Ваша роль: ${role}. Жду команд.\nДоступные команды: /status, /users, /info, /help`,
+      `Регистрация завершена. Ваша роль: ${role}. Жду команд.\nДоступные команды: /status, /users, /info, /msg, /help`,
     );
   }
 
@@ -240,19 +250,29 @@ export class TelegramChannelService {
       return;
     }
 
-    const command = this.#normalizeCommand(message.text);
+    const parsedCommand = this.#parseCommand(message.text);
 
-    if (!command) {
+    if (!parsedCommand) {
+      await this.#handleDirectMessage(
+        token,
+        message.chat.id,
+        message.chat.type,
+        message.message_thread_id,
+        message.from,
+        message.text.trim(),
+      );
       return;
     }
 
-    if (command !== '/start') {
+    if (parsedCommand.name !== '/start') {
       await this.#handleCommand(
         token,
         message.chat.id,
+        message.chat.type,
         message.message_thread_id,
         message.from,
-        command,
+        parsedCommand.name,
+        parsedCommand.args,
       );
       return;
     }
@@ -268,12 +288,48 @@ export class TelegramChannelService {
     await this.#sendRegistrationMessage(token, message.chat.id, message.message_thread_id, pending);
   }
 
+  async #handleDirectMessage(
+    token: string,
+    chatId: number,
+    chatType: 'private' | 'group' | 'supergroup' | 'channel' | undefined,
+    messageThreadId: number | undefined,
+    profile: TelegramUserProfile,
+    text: string,
+  ): Promise<void> {
+    if (chatType !== 'private') {
+      return;
+    }
+
+    const user = this.#store.getTelegramUserByTelegramUserId(profile.id.toString());
+
+    if (!user) {
+      await this.#sendMessage(
+        token,
+        chatId,
+        'Вы еще не авторизованы. Отправьте /start и завершите привязку через CLI.',
+        messageThreadId,
+      );
+      return;
+    }
+
+    await this.#handleModelRequest(
+      token,
+      chatId,
+      messageThreadId,
+      user,
+      text,
+      false,
+    );
+  }
+
   async #handleCommand(
     token: string,
     chatId: number,
+    chatType: 'private' | 'group' | 'supergroup' | 'channel' | undefined,
     messageThreadId: number | undefined,
     profile: TelegramUserProfile,
     command: string,
+    args: string,
   ): Promise<void> {
     if (command === '/help') {
       await this.#sendMessage(
@@ -284,6 +340,7 @@ export class TelegramChannelService {
           '/status - проверить состояние подключения канала',
           '/users - список авторизованных пользователей',
           '/info - общая информация о текущей модели и сессии',
+          '/msg <текст> - отправить запрос модели в групповом чате',
           '/help - показать эту справку',
         ].join('\n'),
         messageThreadId,
@@ -314,6 +371,16 @@ export class TelegramChannelService {
         return;
       case '/info':
         await this.#handleInfoCommand(token, chatId, messageThreadId, user);
+        return;
+      case '/msg':
+        await this.#handleGroupMessageCommand(
+          token,
+          chatId,
+          chatType,
+          messageThreadId,
+          user,
+          args,
+        );
         return;
       default:
         await this.#sendMessage(
@@ -351,6 +418,87 @@ export class TelegramChannelService {
     ];
 
     await this.#sendMessage(token, chatId, lines.join('\n'), messageThreadId);
+  }
+
+  async #handleGroupMessageCommand(
+    token: string,
+    chatId: number,
+    chatType: 'private' | 'group' | 'supergroup' | 'channel' | undefined,
+    messageThreadId: number | undefined,
+    requester: ChannelUserSummary,
+    args: string,
+  ): Promise<void> {
+    if (chatType !== 'group' && chatType !== 'supergroup') {
+      await this.#sendMessage(
+        token,
+        chatId,
+        'Команда /msg нужна только в групповом чате.',
+        messageThreadId,
+      );
+      return;
+    }
+
+    const prompt = args.trim();
+
+    if (!prompt) {
+      await this.#sendMessage(
+        token,
+        chatId,
+        'Использование: /msg <сообщение для модели>',
+        messageThreadId,
+      );
+      return;
+    }
+
+    await this.#handleModelRequest(
+      token,
+      chatId,
+      messageThreadId,
+      requester,
+      prompt,
+      true,
+    );
+  }
+
+  async #handleModelRequest(
+    token: string,
+    chatId: number,
+    messageThreadId: number | undefined,
+    requester: ChannelUserSummary,
+    prompt: string,
+    includeRequesterFooter: boolean,
+  ): Promise<void> {
+    const stopTyping = this.#startTypingIndicator(token, chatId, messageThreadId);
+
+    try {
+      const result = await this.#chatApiService.sandboxChat({
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+      });
+
+      const text = this.#renderAssistantMessage(
+        requester,
+        result.message.content,
+        result.usage?.totalTokens,
+        includeRequesterFooter,
+      );
+      await this.#sendMessage(token, chatId, text, messageThreadId);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Не удалось получить ответ от модели.';
+      await this.#sendMessage(
+        token,
+        chatId,
+        `Ошибка запроса к модели: ${message}`,
+        messageThreadId,
+      );
+    } finally {
+      stopTyping();
+    }
   }
 
   async #handleInfoCommand(
@@ -459,30 +607,43 @@ export class TelegramChannelService {
     await this.#sendMessage(token, chatId, lines.join('\n'), messageThreadId);
   }
 
-  #normalizeCommand(rawText: string): string | undefined {
-    const commandToken = rawText.trim().split(/\s+/, 1)[0]?.toLowerCase();
+  #parseCommand(rawText: string): { name: string; args: string } | undefined {
+    const trimmed = rawText.trim();
+    const [commandToken, ...rest] = trimmed.split(/\s+/);
+    const normalizedCommand = commandToken?.toLowerCase();
 
-    if (!commandToken?.startsWith('/')) {
+    if (!normalizedCommand?.startsWith('/')) {
       return undefined;
     }
 
-    const [commandName, botMention] = commandToken.split('@', 2);
+    const [commandName, botMention] = normalizedCommand.split('@', 2);
 
     if (!commandName) {
       return undefined;
     }
 
     if (!botMention) {
-      return commandName;
+      return {
+        name: commandName,
+        args: rest.join(' ').trim(),
+      };
     }
 
     const configuredUsername = this.#store.getTelegramBotConfig()?.username?.toLowerCase();
 
     if (!configuredUsername) {
-      return commandName;
+      return {
+        name: commandName,
+        args: rest.join(' ').trim(),
+      };
     }
 
-    return botMention === configuredUsername ? commandName : undefined;
+    return botMention === configuredUsername
+      ? {
+          name: commandName,
+          args: rest.join(' ').trim(),
+        }
+      : undefined;
   }
 
   #generateRegistrationKey(seed: string): string {
@@ -513,7 +674,7 @@ export class TelegramChannelService {
     chatId: number,
     text: string,
     messageThreadId?: number,
-  ): Promise<void> {
+  ): Promise<TelegramSendMessageResponse | undefined> {
     const payload = await this.#request<TelegramSendMessageResponse>(
       token,
       'sendMessage',
@@ -527,6 +688,82 @@ export class TelegramChannelService {
     if (!payload.ok) {
       throw new Error(payload.description || 'Failed to send Telegram message.');
     }
+
+    return payload;
+  }
+
+  #startTypingIndicator(
+    token: string,
+    chatId: number,
+    messageThreadId?: number,
+  ): () => void {
+    let stopped = false;
+
+    const sendTyping = (): void => {
+      if (stopped) {
+        return;
+      }
+
+      void this.#sendTypingAction(token, chatId, messageThreadId).catch(() => {
+        // Ignore chat action failures so they do not break the actual response.
+      });
+    };
+
+    sendTyping();
+    const timer = setInterval(sendTyping, TYPING_REFRESH_INTERVAL_MS);
+
+    return (): void => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }
+
+  async #sendTypingAction(
+    token: string,
+    chatId: number,
+    messageThreadId?: number,
+  ): Promise<void> {
+    const payload = await this.#request<TelegramChatActionResponse>(
+      token,
+      'sendChatAction',
+      {
+        chat_id: chatId,
+        action: 'typing',
+        ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+      },
+    );
+
+    if (!payload.ok) {
+      throw new Error(payload.description || 'Failed to send Telegram typing action.');
+    }
+  }
+
+  #renderAssistantMessage(
+    requester: ChannelUserSummary,
+    content: string | Array<{ type: string; text?: string }>,
+    totalTokens?: number,
+    includeRequesterFooter = true,
+  ): string {
+    const text =
+      typeof content === 'string'
+        ? content.trim()
+        : content
+            .filter((part): part is { type: 'text'; text: string } => part.type === 'text' && typeof part.text === 'string')
+            .map((part) => part.text.trim())
+            .filter((part) => part.length > 0)
+            .join('\n');
+
+    const lines = [text.length > 0 ? text : '[empty response]'];
+
+    if (includeRequesterFooter) {
+      lines.push('', `Запросил: ${requester.displayName}`);
+    }
+
+    if (totalTokens !== undefined) {
+      lines.push(`Токены: ${totalTokens}`);
+    }
+
+    return lines.join('\n');
   }
 
   async #request<TResponse>(
